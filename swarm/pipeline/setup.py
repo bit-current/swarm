@@ -106,8 +106,7 @@ class BuildPy(build_py):
             download_p2p_daemon()
 
         super().run()
-
-        proto_compile(os.path.join(self.build_lib, "src", "proto"))
+        proto_compile(os.path.join( "src", "proto"))
 
 
 class Develop(develop):
