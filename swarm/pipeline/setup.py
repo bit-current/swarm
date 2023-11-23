@@ -106,7 +106,7 @@ class BuildPy(build_py):
             download_p2p_daemon()
 
         super().run()
-        proto_compile(os.path.join( "src", "proto"))
+        proto_compile(os.path.join("src", "proto"))
 
 
 class Develop(develop):
@@ -129,6 +129,7 @@ setup(
     version=version_string,
     cmdclass={"build_py": BuildPy, "develop": Develop},
     package_data={"src": ["proto/*", "src_cli/*"]},
+    packages=find_packages(),
     include_package_data=True,
     license="MIT",
     setup_requires=["grpcio-tools"],
