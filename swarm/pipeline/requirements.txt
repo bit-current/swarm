@@ -15,5 +15,6 @@ pymultihash>=0.8.2
 cryptography>=3.4.6
 pydantic>=1.8.1
 bitsandbytes-cuda111>=0.0.24
+transformers
 torch_optimizer
 wandb
