@@ -45,7 +45,7 @@ def get_pile_dataset(seed, shards_to_choose):
     shards = random.Random(seed).choices(range(30), k=shards_to_choose)
 
     dsets = [
-        load_dataset("json", data_files=f"https://the-eye.eu/public/AI/pile/train/{shard:02}.jsonl.zst",
+        load_dataset("EleutherAI/pile",
                      streaming=True, split="train") for shard in shards
     ]
 
