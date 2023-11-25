@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import multiprocessing as mp
 import os
+import signal
 from functools import partial
 from typing import Awaitable, Callable, Iterable, List, Optional, Sequence, TypeVar, Union
 
@@ -33,10 +34,10 @@ logger = get_logger(__name__)
 ReturnType = TypeVar("ReturnType")
 
 
-class DHT(mp.Process):
+class DHT(mp.context.ForkProcess):
     """
-    A high-level interface to a src DHT that runs a single DHT node in a background process.
-    * src servers periodically announce their experts via declare_experts (dht_handler.py)
+    A high-level interface to a hivemind DHT that runs a single DHT node in a background process.
+    * hivemind servers periodically announce their experts via declare_experts (dht_handler.py)
     * trainers find most suitable experts via RemoteMixtureOfExperts (beam_search.py)
 
     :param initial_peers: multiaddrs of one or more active DHT peers (if you want to join an existing DHT)
@@ -50,7 +51,7 @@ class DHT(mp.Process):
       (according to their `.merge_with()` policies) and orders them according to the `.priority` properties.
     :param shutdown_timeout: when calling .shutdown, wait for up to this many seconds before terminating
     :param await_ready: if True, the constructor waits until the DHT process is ready to process incoming requests
-    :param kwargs: any other params will be forwarded to DHTNode and src.p2p.P2P upon creation
+    :param kwargs: any other params will be forwarded to DHTNode and hivemind.p2p.P2P upon creation
     """
 
     _node: DHTNode
@@ -69,6 +70,7 @@ class DHT(mp.Process):
         **kwargs,
     ):
         self._parent_pid = os.getpid()
+        self._origin_pid = os.getpid()
         super().__init__()
 
         if not (
@@ -107,6 +109,9 @@ class DHT(mp.Process):
         loop.add_reader(self._inner_pipe.fileno(), pipe_semaphore.release)
 
         async def _run():
+            # Set SIG_IGN handler to SIGINT
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+
             try:
                 if self._daemon_listen_maddr is not None:
                     replicated_p2p = await P2P.replicate(self._daemon_listen_maddr)
@@ -165,7 +170,7 @@ class DHT(mp.Process):
             self._outer_pipe.send(("_shutdown", [], {}))
             self.join(self.shutdown_timeout)
             if self.is_alive():
-                logger.warning("DHT did not shut down within the grace period; terminating it the hard way.")
+                logger.warning("DHT did not shut down within the grace period; terminating it the hard way")
                 self.terminate()
 
     async def _shutdown(self):
@@ -182,6 +187,7 @@ class DHT(mp.Process):
         :param kwargs: parameters forwarded to DHTNode.get_many_by_id
         :returns: (value, expiration time); if value was not found, returns None
         """
+        assert os.getpid() != self.pid, "calling *external* DHT interface from inside DHT will result in a deadlock"
         future = MPFuture()
         self._outer_pipe.send(("_get", [], dict(key=key, latest=latest, future=future, **kwargs)))
         return future if return_future else future.result()
@@ -210,11 +216,12 @@ class DHT(mp.Process):
 
         :param key: msgpack-serializable key to be associated with value until expiration.
         :param value: msgpack-serializable value to be stored under a given key until expiration.
-        :param expiration_time: absolute time when the entry should expire, based on src.get_dht_time()
+        :param expiration_time: absolute time when the entry should expire, based on hivemind.get_dht_time()
         :param subkey: if specified, add a value under that subkey instead of overwriting key (see DHTNode.store_many)
         :param return_future: if False (default), return when finished. Otherwise return MPFuture and run in background.
         :returns: True if store succeeds, False if it fails (due to no response or newer value)
         """
+        assert os.getpid() != self.pid, "calling *external* DHT interface from inside DHT will result in a deadlock"
         future = MPFuture()
         self._outer_pipe.send(
             (
@@ -257,8 +264,9 @@ class DHT(mp.Process):
           DHT fields made by this coroutine will not be accessible from the host process.
         :note: all time-consuming operations in coro should be asynchronous (e.g. asyncio.sleep instead of time.sleep)
           or use asyncio.get_event_loop().run_in_executor(...) to prevent coroutine from blocking background DHT tasks
-        :note: when run_coroutine is called with wait=False, MPFuture can be cancelled to interrupt the task.
+        :note: when run_coroutine is called with return_future=False, MPFuture can be cancelled to interrupt the task.
         """
+        assert os.getpid() != self.pid, "calling *external* DHT interface from inside DHT will result in a deadlock"
         future = MPFuture()
         self._outer_pipe.send(("_run_coroutine", [], dict(coro=coro, future=future)))
         return future if return_future else future.result()
@@ -288,7 +296,11 @@ class DHT(mp.Process):
     @property
     def peer_id(self) -> PeerID:
         if self._peer_id is None:
-            self._peer_id = self.run_coroutine(DHT._get_peer_id)
+            if os.getpid() == self.pid:
+                self._peer_id = self._node.peer_id
+            else:
+                # note: we cannot run_coroutine from the same pid because it would deadlock the event loop
+                self._peer_id = self.run_coroutine(DHT._get_peer_id)
         return self._peer_id
 
     @staticmethod
@@ -323,8 +335,8 @@ class DHT(mp.Process):
         Get a replica of a P2P instance used in the DHT process internally.
         The replica uses the same P2P daemon as the DHT and only works while DHT is alive.
         """
-
-        if self._p2p_replica is None:
+        if self._p2p_replica is None or self._origin_pid != os.getpid():
+            self._origin_pid = os.getpid()
             daemon_listen_maddr = self.run_coroutine(DHT._get_p2p_daemon_listen_maddr)
             self._p2p_replica = await P2P.replicate(daemon_listen_maddr)
         return self._p2p_replica

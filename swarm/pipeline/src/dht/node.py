@@ -39,7 +39,7 @@ from src.utils.timed_storage import DHTExpiration, TimedStorage, ValueWithExpira
 logger = get_logger(__name__)
 
 
-DEFAULT_NUM_WORKERS = int(os.getenv("SRC_DHT_NUM_WORKERS", 4))
+DEFAULT_NUM_WORKERS = int(os.getenv("HIVEMIND_DHT_NUM_WORKERS", 4))
 
 
 class DHTNode:
@@ -47,15 +47,15 @@ class DHTNode:
     Asyncio-based class that represents one DHT participant. Created via await DHTNode.create(...)
     Each DHTNode has an identifier, a local storage and access too other nodes via DHTProtocol.
 
-    :note: DHT is optimized to store a lot of temporary metadata that is regularly updated.
-     For example, expert heartbeat emitted by a src.moe.Server responsible for that expert.
+    :note: Hivemind DHT is optimized to store a lot of temporary metadata that is regularly updated.
+     For example, expert heartbeat emitted by a hivemind.moe.Server responsible for that expert.
      Such metadata does not require regular maintenance by peers or persistence on shutdown.
      Instead, DHTNode is designed to rapidly send bulk data and resolve conflicts.
 
     Every (key, value) pair in this DHT has an expiration time - float computed as get_dht_time() (UnixTime by default)
     DHT nodes always prefer values with higher expiration time and may delete any value past its expiration.
 
-    Similar to Kademlia RPC protocol, src DHT has 3 RPCs:
+    Similar to Kademlia RPC protocol, hivemind DHT has 3 RPCs:
 
     * ping - request peer's identifier and update routing table (same as Kademlia PING RPC)
     * store - send several (key, value, expiration_time) pairs to the same peer (like Kademlia STORE, but in bulk)
@@ -126,10 +126,10 @@ class DHTNode:
         **kwargs,
     ) -> DHTNode:
         """
-        :param p2p: instance of src.p2p.P2P that will be used for communication.
+        :param p2p: instance of hivemind.p2p.P2P that will be used for communication.
           If None, DHTNode will create and manage its own P2P instance with given initial_peers and
           parameters from ``kwargs``
-        :param node_id: current node's DHTID for src.dht, determines which keys it will store locally,
+        :param node_id: current node's DHTID for hivemind.dht, determines which keys it will store locally,
           defaults to random id
         :param initial_peers: multiaddrs of one or more active DHT peers (if you want to join an existing DHT)
         :param bucket_size: max number of nodes in one k-bucket (k). Trying to add {k+1}st node will cause a bucket to
@@ -146,7 +146,7 @@ class DHTNode:
         :param cache_locally: if True, caches all values (stored or found) in a node-local cache
         :param cache_on_store: if True, update cache entries for a key after storing a new item for that key
         :param cache_nearest: whenever DHTNode finds a value, it will also store (cache) this value on this many
-          nodes nearest nodes visited by search algorithm. Prefers nodes that are nearest to :key: but have no value yet
+          nearest nodes visited by search algorithm. Prefers nodes that are nearest to :key: but have no value yet
         :param cache_size: if specified, local cache will store up to this many records (as in LRU cache)
         :param cache_refresh_before_expiry: if nonzero, refreshes locally cached values
           if they are accessed this many seconds before expiration time.
@@ -164,7 +164,7 @@ class DHTNode:
         :param record_validator: instance of RecordValidatorBase used for signing and validating stored records
         :param authorizer: instance of AuthorizerBase used for signing and validating requests and response
           for a given authorization protocol
-        :param kwargs: extra parameters for an internally created instance of src.p2p.P2P.
+        :param kwargs: extra parameters for an internally created instance of hivemind.p2p.P2P.
           Should be empty if the P2P instance is provided in the constructor
         """
         self = cls(_initialized_with_create=True)
@@ -194,7 +194,7 @@ class DHTNode:
         else:
             if kwargs:
                 raise ValueError(
-                    f"**kwargs in DHTNode.create() should be empty if src.p2p.P2P instance is provided"
+                    f"**kwargs in DHTNode.create() should be empty if hivemind.p2p.P2P instance is provided"
                     f"in the constructor. Got kwargs = {kwargs} instead. "
                     f"You may have a typo in a DHTNode.create() parameter name"
                 )
@@ -254,7 +254,7 @@ class DHTNode:
             await asyncio.wait(
                 [
                     asyncio.create_task(self.find_nearest_nodes([self.node_id])),
-                    asyncio.sleep(bootstrap_timeout - get_dht_time() + start_time),
+                    asyncio.create_task(asyncio.sleep(bootstrap_timeout - get_dht_time() + start_time)),
                 ],
                 return_when=asyncio.FIRST_COMPLETED,
             )
@@ -271,6 +271,7 @@ class DHTNode:
     async def shutdown(self):
         """Process existing requests, close all connections and stop the server"""
         self.is_alive = False
+        await self.protocol.shutdown()
         if self._should_shutdown_p2p:
             await self.p2p.shutdown()
 
@@ -341,7 +342,7 @@ class DHTNode:
     ) -> bool:
         """
         Find num_replicas best nodes to store (key, value) and store it there at least until expiration time.
-        :note: store is a simplified interface to store_many, all kwargs are be forwarded there
+        :note: store is a simplified interface to store_many, all kwargs are forwarded there
         :returns: True if store succeeds, False if it fails (due to no response or newer value)
         """
         store_ok = await self.store_many([key], [value], [expiration_time], subkeys=[subkey], **kwargs)
@@ -585,7 +586,7 @@ class DHTNode:
             If min_expiration_time=float('inf'), this method will find a value with _latest_ expiration
         :param beam_size: maintains up to this many nearest nodes when crawling dht, default beam_size = bucket_size
         :param num_workers: override for default num_workers, see traverse_dht num_workers param
-        :param return_futures: if True, immediately return asyncio.Future for every before interacting with the nework.
+        :param return_futures: if True, immediately return asyncio.Future for every before interacting with the network.
          The algorithm will populate these futures with (value, expiration) when it finds the corresponding key
          Note: canceling a future will stop search for the corresponding key
         :param _is_refresh: internal flag, set to True by an internal cache refresher (if enabled)
@@ -717,7 +718,7 @@ class DHTNode:
         """Add key to a refresh queue, refresh at :refresh_time: or later"""
         if self.cache_refresh_task is None or self.cache_refresh_task.done() or self.cache_refresh_task.cancelled():
             self.cache_refresh_task = asyncio.create_task(self._refresh_stale_cache_entries())
-            logger.debug("Spawned cache refresh task.")
+            logger.debug("Spawned cache refresh task")
         earliest_key, earliest_item = self.cache_refresh_queue.top()
         if earliest_item is None or refresh_time < earliest_item.expiration_time:
             self.cache_refresh_evt.set()  # if we new element is now earliest, notify the cache queue
